@@ -1,0 +1,297 @@
+USE UAT
+GO
+/****** Object:  StoredProcedure [dbo].[IOFSIWTbsp_LoanType5DailyIntAccrualSelection]    Script Date: 1/2/2022 9:16:32 AM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+ALTER PROCEDURE [dbo].[LoanType5DailyIntAccrualSelection] (@ValueDate AS DATE)  
+
+AS
+BEGIN
+DECLARE @YearDays AS INT;
+DECLARE @RepaySum AS MONEY;
+--SET @ValueDate = '1-jan-2020';
+SET @YearDays = DATEDIFF(day, CAST(YEAR(@ValueDate) AS CHAR(4)) + '0101', CAST(YEAR(@ValueDate) + 1 AS CHAR(4)) + '0101');
+
+	BEGIN
+			
+
+			SELECT       [LoanType], 
+                              [TransNo], 
+                              [CustAID], 
+                              [LoanAmount], 
+                              [Interest], 
+                              [RepaymentPeriod], 
+                              [CommencementDate], 
+                              [LoanAID], 
+                              [LoanSub], 
+                              [LoanIntAID], 
+                              [LoanIntSub], 
+                              a.[TxnDate], 
+                              @ValueDate AS EffectiveDate, 
+                              [InstrumentType],
+                              ((LoanBal * IntRate * 1) / @YearDays) / 100 DailyInt,
+							  LoanBal CurrentPrincipal
+                       FROM [IOFSAccruedIntOnly] A JOIN Loans B ON A.LoanID = B.TransNo WHERE B.Liquidated <> 1 AND (@ValueDate BETWEEN B.CommencementDate AND B.MaturityDate) AND A.LoanBal <> 0.00
+	END
+END
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+USE UAT
+GO
+/****** Object:  StoredProcedure [dbo].[IOFSIWTbsp_LoanType5DailyIntAccrualReversal]    Script Date: 1/2/2022 9:16:29 AM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER PROCEDURE [dbo].[LoanType5DailyIntAccrualReversal] (@ValueDate AS DATE)
+
+AS
+BEGIN
+DECLARE @YearDays AS INT;
+DECLARE @RepaySum AS MONEY;
+--SET @ValueDate = '1-jan-2020';
+SET @YearDays = DATEDIFF(day, CAST(YEAR(GETDATE()) AS CHAR(4)) + '0101', CAST(YEAR(GETDATE()) + 1 AS CHAR(4)) + '0101');
+
+
+	BEGIN  -----Here we are copying out the data to another table history purposes
+	      INSERT INTO [dbo].[IOFSAcct_GLAccrRev]
+				   ([EffectiveDate]
+				   ,[AccountID]
+				   ,[Sub]
+				   ,[LedgerType]
+				   ,[Amount]
+				   ,[Description]
+				   ,[TransType]
+				   ,[SysRef]
+				   ,[Ref01]
+				   ,[Ref02]
+				   ,[FiscalYear]
+				   ,[Month]
+				   ,[BatchNo]
+				   ,[UserID]
+				   ,[TxnDate]
+				   ,[BranchCode])
+			SELECT 
+				   [EffectiveDate]
+				  ,[AccountID]
+				  ,[Sub]
+				  ,[LedgerType]
+				  ,[Amount]
+				  ,[Description]
+				  ,[TransType]
+				  ,[SysRef]
+				  ,[Ref01]
+				  ,[Ref02]
+				  ,[FiscalYear]
+				  ,[Month]
+				  ,[BatchNo]
+				  ,[UserID]
+				  ,[TxnDate]
+				  ,[BranchCode]
+		  FROM [dbo].[Acct_GL] WHERE SysRef = CONCAT('IOFS-',@ValueDate) and EffectiveDate = @ValueDate
+	END
+	BEGIN  ----Here we are removing the data from the table with the Acct_GL constraints
+		DELETE FROM dbo.Acct_GLAlerts WHERE GLID IN (SELECT ID# FROM Acct_GL WHERE SysRef = CONCAT('IOFS-',@ValueDate) and EffectiveDate = @ValueDate)
+	END
+	BEGIN ----Here we are now removing the data from the Acct_GL table in order to allow same but completed go into the table
+		DELETE FROM Acct_GL WHERE SysRef = CONCAT('IOFS-',@ValueDate) and EffectiveDate = @ValueDate
+	END
+	BEGIN ----Here we are copying the data into another table for history purposes
+		INSERT INTO [dbo].[IOFSLoansIntAccrualReversal] 
+				 ([LoanType]
+				  ,[TransNo]
+				  ,[CustAID]
+				  ,[LoanAmount]
+				  ,[Interest]
+				  ,[RepaymentPeriod]
+				  ,[CommencementDate]
+				  ,[AccruedInterest]
+				  ,[LoanAID]
+				  ,[LoanSub]
+				  ,[LoanIntAID]
+				  ,[LoanIntSub]
+				  ,[TxnDate]
+				  ,[EffectiveDate]
+				  ,[CurrentPrincipal]
+				  ,[IsPosted]
+				  ,[InstrumentType])
+		SELECT     
+			       [LoanType]
+				  ,[TransNo]
+				  ,[CustAID]
+				  ,[LoanAmount]
+				  ,[Interest]
+				  ,[RepaymentPeriod]
+				  ,[CommencementDate]
+				  ,[AccruedInterest]
+				  ,[LoanAID]
+				  ,[LoanSub]
+				  ,[LoanIntAID]
+				  ,[LoanIntSub]
+				  ,[TxnDate]
+				  ,[EffectiveDate]
+				  ,[CurrentPrincipal]
+				  ,[IsPosted]
+				  ,[InstrumentType]
+			FROM [IOFSLoansIntAccrual] WHERE EffectiveDate = @ValueDate
+	END
+	BEGIN ----Hear we are removing the data from the main table in order to allow same but completed go into the table
+		DELETE FROM [IOFSLoansIntAccrual] WHERE EffectiveDate = @ValueDate
+	END
+END
+
+----------------------------------------------------------------------------------------------------------------------------------
+
+
+USE UAT
+GO
+/****** Object:  StoredProcedure [dbo].[IOFSIWTbsp_LoanMthlyRunGLPost]    Script Date: 1/2/2022 9:16:25 AM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER PROCEDURE [dbo].[LoanMthlyRunGLPost](@ValueDate AS DATE)
+AS
+BEGIN
+        IF EXISTS
+        (
+            SELECT TOP 1 SysRef
+            FROM [dbo].[Acct_GL]
+            WHERE SysRef = CONCAT('ILNMR-', YEAR(@ValueDate), MONTH(@ValueDate))
+        )
+            BEGIN
+                RAISERROR('Interest already posted for the month specified, please select another month!!!', 1, 1);
+                RETURN
+        END
+		ELSE
+            BEGIN
+                INSERT INTO [dbo].[Acct_GL]
+                ([EffectiveDate], 
+                 [AccountID], 
+                 [Sub], 
+                 [LedgerType], 
+                 [Amount], 
+                 [Description], 
+                 [TransType], 
+                 [SysRef], 
+                 [Ref01], 
+                 [FiscalYear], 
+                 [Month], 
+                 [BatchNo], 
+                 [UserID], 
+                 [TxnDate], 
+                 [BranchCode]
+                )
+                       SELECT a.[ScheduleDate] AS EffectiveDate, 
+                              b.LoanAID, 
+                              b.LoanSub, 
+                              'NGN' AS LedgerType, 
+                              ROUND((d.DailyInt * (case when a.Interest = 0 then DAY(EOMONTH(@ValueDate)) - DAY(a.ScheduleDate)  else DAY(EOMONTH(@ValueDate)) end)) * -1,0) AS Amount, 
+                              CONCAT('Loan Interest accrual - Deposit#: ', a.TransNo, ', ', 'Cust ID: ', b.CustAID, ', ', 'Month: ', YEAR(ScheduleDate), MONTH(ScheduleDate)) AS [Description], 
+                              'IOFS-LNMTHLYRUN' AS TransType, 
+                              CONCAT('ILNMR-', YEAR(ScheduleDate), MONTH(ScheduleDate)) AS SysRef, 
+                              a.TransNo AS Ref01, 
+                              YEAR(ScheduleDate) AS FiscalYear, 
+                              MONTH(ScheduleDate) AS [Month], 
+                              0 AS BatchNo, 
+                              a.UserID, 
+                              GETDATE() AS TxnDate,
+                              CASE
+                                  WHEN C.BranchCode IS NULL
+                                  THEN '009'
+                                  ELSE C.BranchCode
+                              END AS Branchcode
+                       FROM [Le_ASchedule] a
+                            JOIN Loans b ON a.TransNo = b.TransNo
+                            JOIN Acct_Subs c ON b.CustAID = c.Sub
+                                                AND b.LoanAID = c.AccountID
+                            JOIN
+                       (
+                           SELECT transno, 
+                                  ROUND(MAX(interest) / 31, 2) DailyInt
+                           FROM Le_ASchedule
+                           GROUP BY TransNo
+                       ) d ON a.TransNo = d.TransNo
+                       WHERE  ROUND((d.DailyInt * (case when a.Interest = 0 then DAY(EOMONTH(@ValueDate)) - DAY(a.ScheduleDate)  else DAY(EOMONTH(@ValueDate)) end)) * -1,0) <> 0
+                             AND MONTH(ScheduleDate) = MONTH(@ValueDate)
+                             AND YEAR(ScheduleDate) = YEAR(@ValueDate)
+                             AND b.Liquidated <> 1
+                             AND b.Approved = 1 AND (@ValueDate BETWEEN B.CommencementDate AND B.MaturityDate) AND b.TransNo NOT IN (SELECT LoanID FROM [StopAccrual]) AND B.LoanType <> 5
+                       UNION ALL
+                       SELECT a.[ScheduleDate] AS EffectiveDate, 
+                              b.LoanIntAID AS AccountID, 
+                              b.LoanIntSub AS Sub, 
+                              'NGN' AS LedgerType, 
+                              ROUND((d.DailyInt * (case when a.Interest = 0 then DAY(EOMONTH(@ValueDate)) - DAY(a.ScheduleDate)  else DAY(EOMONTH(@ValueDate)) end)),0) AS Amount, 
+                              CONCAT('Loan Interest accrual - Deposit#: ', a.TransNo, ', ', 'Cust ID: ', b.CustAID, ', ', 'Month: ', YEAR(ScheduleDate), MONTH(ScheduleDate)) AS [Description], 
+                              'IOFS-LNMTHLYRUN' AS TransType, 
+                              CONCAT('ILNMR-', YEAR(ScheduleDate), MONTH(ScheduleDate)) AS SysRef, 
+                              a.TransNo AS Ref01, 
+                              YEAR(ScheduleDate) AS FiscalYear, 
+                              MONTH(ScheduleDate) AS [Month], 
+                              0 AS BatchNo, 
+                              a.UserID, 
+                              GETDATE() AS TxnDate,
+                              CASE
+                                  WHEN C.BranchCode IS NULL
+                                  THEN '009'
+                                  ELSE C.BranchCode
+                              END AS Branchcode
+                       FROM [Le_ASchedule] a
+                            JOIN Loans b ON a.TransNo = b.TransNo
+                            JOIN Acct_Subs c ON b.CustAID = c.Sub
+                                                AND b.LoanAID = c.AccountID
+                            JOIN
+                       (
+                           SELECT transno, 
+                                  ROUND(MAX(interest) / 31, 2) DailyInt
+                           FROM Le_ASchedule
+                           GROUP BY TransNo
+                       ) d ON a.TransNo = d.TransNo
+                       WHERE ROUND((d.DailyInt * (case when a.Interest = 0 then DAY(EOMONTH(@ValueDate)) - DAY(a.ScheduleDate)  else DAY(EOMONTH(@ValueDate)) end)),0) <> 0
+                             AND MONTH(ScheduleDate) = MONTH(@ValueDate)
+                             AND YEAR(ScheduleDate) = YEAR(@ValueDate)
+                             AND b.Liquidated <> 1
+                             AND b.Approved = 1 AND (@ValueDate BETWEEN B.CommencementDate AND B.MaturityDate) AND b.TransNo NOT IN (SELECT LoanID FROM [StopAccrual]) AND B.LoanType <> 5
+        END
+        
+    END
+    
+    
+    --------------------------------------------------------------------------------------------------------------------------------------------------------------
+    
+    
+    USE UAT
+GO
+/****** Object:  StoredProcedure [dbo].[IOFSIWTbsp_LoanMthlyRunGLPostRvr]    Script Date: 1/2/2022 9:16:17 AM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER PROCEDURE [dbo].[LoanMthlyRunGLPostRvr] (@ValueDate AS DATE)
+
+AS
+BEGIN
+
+IF EXISTS (SELECT TOP 1 SysRef FROM [dbo].[Acct_GL] WHERE SysRef = CONCAT('ILNMR-',YEAR(@ValueDate), MONTH(@ValueDate)))
+	BEGIN
+		BEGIN
+			DELETE FROM [Acct_GLRev] WHERE GLID IN
+			(SELECT A.ID# FROM Acct_GL A JOIN Loans L ON A.Ref01 = L.TransNo WHERE SysRef = CONCAT('ILNMR-',YEAR(@ValueDate), MONTH(@ValueDate)))
+		END
+
+		BEGIN
+			DELETE FROM [Acct_GL] WHERE ID# IN
+			(SELECT A.ID# FROM Acct_GL A JOIN Loans L ON A.Ref01 = L.TransNo WHERE SysRef = CONCAT('ILNMR-',YEAR(@ValueDate), MONTH(@ValueDate)))
+		END
+	END	
+	ELSE
+	BEGIN
+				Raiserror ('There is no Interest accrued for the month select!!!',1,1)
+	END
+END
+    
